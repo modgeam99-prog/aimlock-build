@@ -14,17 +14,25 @@
 #include <cstdlib>
 #include <sys/system_properties.h>
 
-#define LOG_TAG "AimLockS7"
+#define LOG_TAG "AimLockHead"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-static int   g_lockStrength = 100;
-static int   g_aimSpeed     = 100;
-static int   g_headshotBias = 100;
-static int   g_touchHz      = 240;
-static int   g_headOffsetY  = -60;
-static float g_maxRange     = 800.0f;
-static float g_deadZone     = 0.0f;
+// ===== CẤU HÌNH GHIM ĐẦU CHẶT =====
+static int   g_lockStrength  = 100;
+static int   g_aimSpeed      = 100;
+static int   g_headshotBias  = 100;
+static int   g_touchHz       = 240;
+static int   g_headOffsetY   = -80;    // kéo cao hơn về phía đầu
+static float g_maxRange      = 1200.0f;
+static float g_deadZone      = 0.0f;
+
+// Ghim chặt đầu
+static float g_headMultiplier   = 1.5f;   // kéo mạnh hơn khi gần đầu
+static float g_stickyStrength   = 1.0f;   // giữ chặt mục tiêu
+static float g_lockCurve        = 0.15f;  // đường cong kéo (phi tuyến tính)
+static int   g_snapThreshold    = 25;     // khoảng cách để "dính chặt"
+static int   g_snapStrength     = 200;    // lực snap khi trong ngưỡng
 
 static int   g_screenW = 0, g_screenH = 0;
 static float g_centerX = 0, g_centerY = 0;
@@ -127,22 +135,51 @@ static void touchUp(int fd) {
     writeEv(fd, EV_SYN, SYN_REPORT, 0);
 }
 
-static void computeLock(float tx, float ty, int* ox, int* oy, bool* ok) {
+// ===== TÍNH TOÁN GHIM ĐẦU CHẶT =====
+static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
     *ok = false;
     float dx = tx - g_centerX;
     float dy = ty - g_centerY;
     float dist = sqrtf(dx*dx + dy*dy);
+
     if (dist > g_maxRange) return;
-    if (dist < g_deadZone) return;
+    if (dist < g_deadZone) {
+        *ox = (int)g_centerX;
+        *oy = (int)g_centerY;
+        *ok = true;
+        return;
+    }
+
+    // Vector đơn vị
     float nx = dx / dist;
     float ny = dy / dist;
+
+    // Hệ số cơ bản
     float st = g_lockStrength / 100.0f;
     float sp = g_aimSpeed / 100.0f;
     float hb = (g_headshotBias / 100.0f) * g_headOffsetY;
-    float mx = nx * st * sp * dist * 0.1f;
-    float my = (ny * st * sp * dist * 0.1f) + hb;
-    if (mx > 300) mx = 300; if (mx < -300) mx = -300;
-    if (my > 300) my = 300; if (my < -300) my = -300;
+
+    // Đường cong phi tuyến tính - kéo mạnh khi gần, chậm khi xa
+    float curveFactor = 1.0f + (g_lockCurve * (1.0f - dist / g_maxRange));
+    if (dist < 100.0f) {
+        curveFactor *= g_headMultiplier;
+    }
+
+    float mx = nx * st * sp * dist * 0.1f * curveFactor;
+    float my = (ny * st * sp * dist * 0.1f * curveFactor) + hb;
+
+    // SNAP - DÍNH CHẶT khi trong ngưỡng
+    if (dist < g_snapThreshold) {
+        // Kéo gần như tức thời về target
+        float snapFactor = (1.0f - (dist / (float)g_snapThreshold));
+        mx = nx * snapFactor * g_snapStrength * g_stickyStrength;
+        my = (ny * snapFactor * g_snapStrength * g_stickyStrength) + hb;
+    }
+
+    // Clamp
+    if (mx > 400) mx = 400; if (mx < -400) mx = -400;
+    if (my > 400) my = 400; if (my < -400) my = -400;
+
     *ox = (int)(g_centerX + mx);
     *oy = (int)(g_centerY + my);
     *ok = true;
@@ -152,15 +189,18 @@ static void* aimLoop(void*) {
     int delayUs = 1000000 / g_touchHz;
     int tid = 1;
     bool touching = false;
+
     while (g_running) {
         pthread_mutex_lock(&g_mutex);
         bool has = g_hasTarget;
         float tx = g_targetX, ty = g_targetY;
         pthread_mutex_unlock(&g_mutex);
+
         int fd = (g_inputFd >= 0) ? g_inputFd : g_uinputFd;
+
         if (has) {
             int ox, oy; bool ok;
-            computeLock(tx, ty, &ox, &oy, &ok);
+            computeHeadLock(tx, ty, &ox, &oy, &ok);
             if (ok && fd >= 0) {
                 if (!touching) {
                     touchDown(fd, (int)g_centerX, (int)g_centerY, tid++);
@@ -174,6 +214,7 @@ static void* aimLoop(void*) {
         }
         usleep(delayUs);
     }
+
     if (touching) {
         int fd = (g_inputFd >= 0) ? g_inputFd : g_uinputFd;
         if (fd >= 0) touchUp(fd);
@@ -183,9 +224,10 @@ static void* aimLoop(void*) {
 
 __attribute__((constructor))
 static void onLoad() {
-    LOGI("=== AimLock S7 loaded ===");
+    LOGI("=== AimLock HeadLock loaded ===");
     readDeviceProps();
     sleep(5);
+
     FILE* fp = popen("wm size", "r");
     if (fp) {
         char buf[128];
@@ -200,15 +242,19 @@ static void onLoad() {
         }
         pclose(fp);
     }
+
     g_inputFd = openInputDevice();
     if (g_inputFd < 0) g_uinputFd = createUinput();
     if (g_inputFd < 0 && g_uinputFd < 0) {
         LOGE("Khong mo duoc input");
         return;
     }
+
     g_running = true;
     pthread_create(&g_thread, nullptr, aimLoop, nullptr);
-    LOGI("AimLock da bat");
+    LOGI("AimLock HeadLock da bat");
+
+    // Demo target - có thể thay bằng setTarget() từ vision module
     pthread_mutex_lock(&g_mutex);
     g_targetX = g_centerX;
     g_targetY = g_centerY - 300;
@@ -237,6 +283,22 @@ JNIEXPORT void JNICALL Java_com_aimlock_Native_clearTarget(JNIEnv*, jclass) {
     pthread_mutex_lock(&g_mutex);
     g_hasTarget = false;
     pthread_mutex_unlock(&g_mutex);
+}
+JNIEXPORT void JNICALL Java_com_aimlock_Native_setConfig(JNIEnv*, jclass,
+    jint ls, jint asp, jint hb, jint hz, jint hoy) {
+    g_lockStrength = ls;
+    g_aimSpeed     = asp;
+    g_headshotBias = hb;
+    g_touchHz      = hz;
+    g_headOffsetY  = hoy;
+}
+JNIEXPORT void JNICALL Java_com_aimlock_Native_setHeadLockConfig(JNIEnv*, jclass,
+    jfloat headMult, jfloat sticky, jfloat curve, jint snapThresh, jint snapStr) {
+    g_headMultiplier = headMult;
+    g_stickyStrength = sticky;
+    g_lockCurve      = curve;
+    g_snapThreshold  = snapThresh;
+    g_snapStrength   = snapStr;
 }
 JNIEXPORT jboolean JNICALL Java_com_aimlock_Native_isRunning(JNIEnv*, jclass) {
     return g_running ? JNI_TRUE : JNI_FALSE;
