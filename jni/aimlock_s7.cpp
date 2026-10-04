@@ -1,3 +1,8 @@
+// File: jni/aimlock_s7.cpp
+// Build qua GitHub Actions → libaimlock.so
+// Aimlock tối ưu cho Samsung Galaxy S7 - KHÔNG ROOT
+// Nạp runtime qua Frida / X8 Sandbox vào Free Fire / Free Fire MAX
+
 #include <jni.h>
 #include <android/log.h>
 #include <dlfcn.h>
@@ -14,38 +19,33 @@
 #include <cstdlib>
 #include <sys/system_properties.h>
 
-#define LOG_TAG "AimLockHead"
+#define LOG_TAG "AimLockS7"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// ===== CẤU HÌNH =====
-static int   g_lockStrength  = 100;
-static int   g_aimSpeed      = 130;     // tăng tốc kéo tâm (nhẹ tay hơn)
-static int   g_headshotBias  = 100;
-static int   g_touchHz       = 240;
-static int   g_headOffsetY   = -400;
-static float g_maxRange      = 1200.0f;
-static float g_deadZone      = 0.0f;
+// ===== CẤU HÌNH TỐI ƯU S7 =====
+static int   g_lockStrength   = 100;
+static int   g_aimSpeed       = 130;
+static int   g_headshotBias   = 100;
+static int   g_touchHz        = 240;
+static int   g_headOffsetY    = -400;
+static float g_maxRange       = 1500.0f;
+static float g_deadZone       = 0.0f;
 
-// Ghim đầu chặt
-static float g_headMultiplier   = 2.0f;
-static float g_stickyStrength   = 1.2f;
-static float g_lockCurve        = 0.25f;
-static int   g_snapThreshold    = 40;
-static int   g_snapStrength     = 300;
-static float g_distanceBias     = 0.15f;
+static float g_headMultiplier = 2.0f;
+static float g_stickyStrength = 1.2f;
+static float g_lockCurve      = 0.25f;
+static int   g_snapThreshold  = 40;
+static int   g_snapStrength   = 300;
+static float g_distanceBias   = 0.15f;
 
-// Kéo tâm nhẹ - hệ số giảm lực
-static float g_dragSmooth       = 0.85f;  // làm mượt kéo tâm
-static float g_touchPressure    = 0.7f;   // lực chạm nhẹ hơn
+static float g_dragSmooth     = 0.85f;
+static float g_touchPressure  = 0.7f;
 
-// Đạn thẳng - no recoil/spread
-static int   g_noRecoil         = 1;      // tắt giật
-static int   g_noSpread         = 1;      // tắt tản
-static float g_recoilMultiplier = 0.0f;   // 0 = không giật
-static float g_spreadMultiplier = 0.0f;   // 0 = không tản
-static float g_recoilDamping    = 0.0f;   // giảm chấn
-static float g_recoilReturn     = 0.0f;   // không hồi
+static int   g_noRecoil       = 1;
+static int   g_noSpread       = 1;
+static float g_recoilMult     = 0.0f;
+static float g_spreadMult     = 0.0f;
 
 static int   g_screenW = 0, g_screenH = 0;
 static float g_centerX = 0, g_centerY = 0;
@@ -54,16 +54,17 @@ static bool  g_hasTarget = false, g_running = false;
 static pthread_t g_thread;
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_inputFd = -1, g_uinputFd = -1;
-
-// State kéo tâm mượt
 static float g_smoothX = 0, g_smoothY = 0;
 
 static void readDeviceProps() {
     char model[PROP_VALUE_MAX] = {0};
+    char androidVer[PROP_VALUE_MAX] = {0};
     __system_property_get("ro.product.model", model);
-    LOGI("Device: %s", model);
+    __system_property_get("ro.build.version.release", androidVer);
+    LOGI("Device: %s | Android: %s", model, androidVer);
 }
 
+// ===== MỞ /dev/input (không root → có thể bị chặn) =====
 static int openInputDevice() {
     for (int i = 0; i < 32; i++) {
         char p[64];
@@ -85,10 +86,11 @@ static int openInputDevice() {
     return -1;
 }
 
+// ===== TẠO UINPUT (cần SELinux permissive hoặc X8 Sandbox patch) =====
 static int createUinput() {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
-        LOGE("Khong mo duoc /dev/uinput");
+        LOGE("Khong mo duoc /dev/uinput: %s", strerror(errno));
         return -1;
     }
     ioctl(fd, UI_SET_EVBIT, EV_ABS);
@@ -117,7 +119,7 @@ static int createUinput() {
     uidev.absmax[ABS_MT_TOUCH_MAJOR] = 255;
     write(fd, &uidev, sizeof(uidev));
     ioctl(fd, UI_DEV_CREATE);
-    LOGI("Da tao uinput");
+    LOGI("Da tao uinput cho S7");
     return fd;
 }
 
@@ -151,7 +153,7 @@ static void touchUp(int fd) {
     writeEv(fd, EV_SYN, SYN_REPORT, 0);
 }
 
-// ===== KÉO TÂM NHẸ + GHIM ĐẦU CHẶT =====
+// ===== GHIM ĐẦU =====
 static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
     *ok = false;
     float dx = tx - g_centerX;
@@ -168,32 +170,24 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
 
     float nx = dx / dist;
     float ny = dy / dist;
-
     float st = g_lockStrength / 100.0f;
     float sp = g_aimSpeed / 100.0f;
 
-    // Offset động theo khoảng cách
     float dynamicOffset = g_headOffsetY - (dist * g_distanceBias);
     float hb = (g_headshotBias / 100.0f) * dynamicOffset;
 
-    // Đường cong phi tuyến
     float curveFactor = 1.0f + (g_lockCurve * (1.0f - dist / g_maxRange));
-    if (dist < 150.0f) {
-        curveFactor *= g_headMultiplier;
-    }
+    if (dist < 150.0f) curveFactor *= g_headMultiplier;
 
-    // Kéo tâm nhẹ - làm mượt
     float rawMx = nx * st * sp * dist * 0.1f * curveFactor;
     float rawMy = (ny * st * sp * dist * 0.1f * curveFactor) + hb;
 
-    // Smooth - giảm lực kéo để nhẹ tay
     g_smoothX = g_smoothX * g_dragSmooth + rawMx * (1.0f - g_dragSmooth);
     g_smoothY = g_smoothY * g_dragSmooth + rawMy * (1.0f - g_dragSmooth);
 
     float mx = g_smoothX;
     float my = g_smoothY;
 
-    // SNAP khi vào ngưỡng
     if (dist < g_snapThreshold) {
         float snapFactor = (1.0f - (dist / (float)g_snapThreshold));
         mx = nx * snapFactor * g_snapStrength * g_stickyStrength;
@@ -210,17 +204,6 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
     *ok = true;
 }
 
-// ===== ĐẠN THẲNG - TÍNH RECOIL ĐÃ BÙ =====
-static void applyBulletStraight(float* recoil, float* spread) {
-    if (g_noRecoil) {
-        *recoil *= g_recoilMultiplier;   // 0 = không giật
-        *recoil *= (1.0f - g_recoilDamping);
-    }
-    if (g_noSpread) {
-        *spread *= g_spreadMultiplier;   // 0 = không tản
-    }
-}
-
 static void* aimLoop(void*) {
     int delayUs = 1000000 / g_touchHz;
     int tid = 1;
@@ -234,11 +217,6 @@ static void* aimLoop(void*) {
 
         int fd = (g_inputFd >= 0) ? g_inputFd : g_uinputFd;
 
-        // Bù giật + tản đạn
-        float recoil = 0.0f;
-        float spread = 0.0f;
-        applyBulletStraight(&recoil, &spread);
-
         if (has) {
             int ox, oy; bool ok;
             computeHeadLock(tx, ty, &ox, &oy, &ok);
@@ -247,9 +225,6 @@ static void* aimLoop(void*) {
                     touchDown(fd, (int)g_centerX, (int)g_centerY, tid++);
                     touching = true;
                 }
-                // Cộng bù giật vào vị trí cuối
-                ox += (int)recoil;
-                oy += (int)spread;
                 touchMove(fd, ox, oy);
             }
         } else if (touching && fd >= 0) {
@@ -270,7 +245,7 @@ static void* aimLoop(void*) {
 
 __attribute__((constructor))
 static void onLoad() {
-    LOGI("=== AimLock HeadLock + BulletStraight loaded ===");
+    LOGI("=== AimLock S7 NoRoot loaded ===");
     readDeviceProps();
     sleep(5);
 
@@ -292,13 +267,13 @@ static void onLoad() {
     g_inputFd = openInputDevice();
     if (g_inputFd < 0) g_uinputFd = createUinput();
     if (g_inputFd < 0 && g_uinputFd < 0) {
-        LOGE("Khong mo duoc input");
+        LOGE("Khong mo duoc input device - can chay trong X8 Sandbox");
         return;
     }
 
     g_running = true;
     pthread_create(&g_thread, nullptr, aimLoop, nullptr);
-    LOGI("AimLock + BulletStraight da bat");
+    LOGI("AimLock S7 da bat");
 
     pthread_mutex_lock(&g_mutex);
     g_targetX = g_centerX;
@@ -331,33 +306,24 @@ JNIEXPORT void JNICALL Java_com_aimlock_Native_clearTarget(JNIEnv*, jclass) {
 }
 JNIEXPORT void JNICALL Java_com_aimlock_Native_setConfig(JNIEnv*, jclass,
     jint ls, jint asp, jint hb, jint hz, jint hoy) {
-    g_lockStrength = ls;
-    g_aimSpeed     = asp;
-    g_headshotBias = hb;
-    g_touchHz      = hz;
-    g_headOffsetY  = hoy;
+    g_lockStrength = ls; g_aimSpeed = asp; g_headshotBias = hb;
+    g_touchHz = hz; g_headOffsetY = hoy;
 }
 JNIEXPORT void JNICALL Java_com_aimlock_Native_setHeadLockConfig(JNIEnv*, jclass,
     jfloat headMult, jfloat sticky, jfloat curve, jint snapThresh,
     jint snapStr, jfloat distBias) {
-    g_headMultiplier = headMult;
-    g_stickyStrength = sticky;
-    g_lockCurve      = curve;
-    g_snapThreshold  = snapThresh;
-    g_snapStrength   = snapStr;
-    g_distanceBias   = distBias;
+    g_headMultiplier = headMult; g_stickyStrength = sticky;
+    g_lockCurve = curve; g_snapThreshold = snapThresh;
+    g_snapStrength = snapStr; g_distanceBias = distBias;
 }
 JNIEXPORT void JNICALL Java_com_aimlock_Native_setDragSmooth(JNIEnv*, jclass,
     jfloat smooth, jfloat pressure) {
-    g_dragSmooth    = smooth;
-    g_touchPressure = pressure;
+    g_dragSmooth = smooth; g_touchPressure = pressure;
 }
 JNIEXPORT void JNICALL Java_com_aimlock_Native_setBulletStraight(JNIEnv*, jclass,
     jint noRecoil, jint noSpread, jfloat recoilMult, jfloat spreadMult) {
-    g_noRecoil         = noRecoil;
-    g_noSpread         = noSpread;
-    g_recoilMultiplier = recoilMult;
-    g_spreadMultiplier = spreadMult;
+    g_noRecoil = noRecoil; g_noSpread = noSpread;
+    g_recoilMult = recoilMult; g_spreadMult = spreadMult;
 }
 JNIEXPORT jboolean JNICALL Java_com_aimlock_Native_isRunning(JNIEnv*, jclass) {
     return g_running ? JNI_TRUE : JNI_FALSE;
