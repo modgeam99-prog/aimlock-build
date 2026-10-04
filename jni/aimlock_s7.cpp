@@ -1,4 +1,3 @@
-
 #include <jni.h>
 #include <android/log.h>
 #include <dlfcn.h>
@@ -19,15 +18,16 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// ===== CẤU HÌNH TỐI ƯU S7 =====
+// ===== CẤU HÌNH =====
 static int   g_lockStrength   = 100;
-static int   g_aimSpeed       = 130;
+static int   g_aimSpeed       = 140;      // tăng tốc kéo tâm nhẹ
 static int   g_headshotBias   = 100;
 static int   g_touchHz        = 240;
 static int   g_headOffsetY    = -400;
 static float g_maxRange       = 1500.0f;
-static float g_deadZone       = 0.0f;
+static float g_deadZone       = 12.0f;    // vùng chết - fix rung tâm
 
+// Ghim đầu
 static float g_headMultiplier = 2.0f;
 static float g_stickyStrength = 1.2f;
 static float g_lockCurve      = 0.25f;
@@ -35,9 +35,15 @@ static int   g_snapThreshold  = 40;
 static int   g_snapStrength   = 300;
 static float g_distanceBias   = 0.15f;
 
-static float g_dragSmooth     = 0.85f;
-static float g_touchPressure  = 0.7f;
+// Kéo tâm nhẹ - fix rung
+static float g_dragSmooth     = 0.75f;    // giảm để nhẹ tay hơn
+static float g_touchPressure  = 0.6f;     // lực chạm nhẹ
+static float g_damping        = 0.85f;    // giảm chấn - chống rung
+static float g_overshootLimit = 0.3f;     // giới hạn vượt - fix lố đầu
+static int   g_stabilizeCount = 3;        // số frame ổn định trước khi snap
+static float g_stabilizeRadius= 5.0f;     // bán kính ổn định (px)
 
+// Đạn thẳng
 static int   g_noRecoil       = 1;
 static int   g_noSpread       = 1;
 static float g_recoilMult     = 0.0f;
@@ -50,7 +56,12 @@ static bool  g_hasTarget = false, g_running = false;
 static pthread_t g_thread;
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_inputFd = -1, g_uinputFd = -1;
+
+// State chống rung + chống lố
 static float g_smoothX = 0, g_smoothY = 0;
+static float g_prevX = 0, g_prevY = 0;
+static int   g_stableCounter = 0;
+static float g_lastSentX = 0, g_lastSentY = 0;
 
 static void readDeviceProps() {
     char model[PROP_VALUE_MAX] = {0};
@@ -60,7 +71,6 @@ static void readDeviceProps() {
     LOGI("Device: %s | Android: %s", model, androidVer);
 }
 
-// ===== MỞ /dev/input (không root → có thể bị chặn) =====
 static int openInputDevice() {
     for (int i = 0; i < 32; i++) {
         char p[64];
@@ -82,11 +92,10 @@ static int openInputDevice() {
     return -1;
 }
 
-// ===== TẠO UINPUT (cần SELinux permissive hoặc X8 Sandbox patch) =====
 static int createUinput() {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
-        LOGE("Khong mo duoc /dev/uinput: %s", strerror(errno));
+        LOGE("Khong mo duoc /dev/uinput");
         return -1;
     }
     ioctl(fd, UI_SET_EVBIT, EV_ABS);
@@ -115,7 +124,7 @@ static int createUinput() {
     uidev.absmax[ABS_MT_TOUCH_MAJOR] = 255;
     write(fd, &uidev, sizeof(uidev));
     ioctl(fd, UI_DEV_CREATE);
-    LOGI("Da tao uinput cho S7");
+    LOGI("Da tao uinput");
     return fd;
 }
 
@@ -149,55 +158,102 @@ static void touchUp(int fd) {
     writeEv(fd, EV_SYN, SYN_REPORT, 0);
 }
 
-// ===== GHIM ĐẦU =====
+// ===== TÍNH TOÁN GHIM ĐẦU NHẸ TAY =====
 static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
     *ok = false;
     float dx = tx - g_centerX;
     float dy = ty - g_centerY;
     float dist = sqrtf(dx*dx + dy*dy);
 
-    if (dist > g_maxRange) return;
+    // VÙNG CHẾT - fix rung tâm khi tâm đã gần mục tiêu
     if (dist < g_deadZone) {
-        *ox = (int)g_centerX;
-        *oy = (int)g_centerY;
+        *ox = (int)(g_centerX + g_lastSentX);
+        *oy = (int)(g_centerY + g_lastSentY);
         *ok = true;
         return;
     }
+
+    if (dist > g_maxRange) return;
 
     float nx = dx / dist;
     float ny = dy / dist;
     float st = g_lockStrength / 100.0f;
     float sp = g_aimSpeed / 100.0f;
 
+    // Offset động theo khoảng cách
     float dynamicOffset = g_headOffsetY - (dist * g_distanceBias);
     float hb = (g_headshotBias / 100.0f) * dynamicOffset;
 
+    // Curve factor
     float curveFactor = 1.0f + (g_lockCurve * (1.0f - dist / g_maxRange));
     if (dist < 150.0f) curveFactor *= g_headMultiplier;
 
+    // Kéo tâm thô
     float rawMx = nx * st * sp * dist * 0.1f * curveFactor;
     float rawMy = (ny * st * sp * dist * 0.1f * curveFactor) + hb;
 
+    // LÀM MƯỢT - nhẹ tay
     g_smoothX = g_smoothX * g_dragSmooth + rawMx * (1.0f - g_dragSmooth);
     g_smoothY = g_smoothY * g_dragSmooth + rawMy * (1.0f - g_dragSmooth);
+
+    // GIẢM CHẤN - chống rung
+    g_smoothX *= g_damping;
+    g_smoothY *= g_damping;
 
     float mx = g_smoothX;
     float my = g_smoothY;
 
-    if (dist < g_snapThreshold) {
-        float snapFactor = (1.0f - (dist / (float)g_snapThreshold));
-        mx = nx * snapFactor * g_snapStrength * g_stickyStrength;
-        my = (ny * snapFactor * g_snapStrength * g_stickyStrength) + hb;
-        g_smoothX = mx;
-        g_smoothY = my;
+    // GIỚI HẠN VƯỢT - fix lố đầu
+    float dxMove = mx - g_prevX;
+    float dyMove = my - g_prevY;
+    float moveDist = sqrtf(dxMove*dxMove + dyMove*dyMove);
+    float targetDist = dist * g_overshootLimit;
+
+    if (moveDist > targetDist && targetDist > 0) {
+        float scale = targetDist / moveDist;
+        mx = g_prevX + dxMove * scale;
+        my = g_prevY + dyMove * scale;
     }
 
+    // SNAP với ổn định - chỉ snap khi đã đứng yên
+    if (dist < g_snapThreshold) {
+        float dxStable = fabsf(mx - g_prevX);
+        float dyStable = fabsf(my - g_prevY);
+
+        if (dxStable < g_stabilizeRadius && dyStable < g_stabilizeRadius) {
+            g_stableCounter++;
+            if (g_stableCounter >= g_stabilizeCount) {
+                // Đã ổn định - snap về đúng đầu
+                float snapFactor = (1.0f - (dist / (float)g_snapThreshold));
+                mx = nx * snapFactor * g_snapStrength * g_stickyStrength;
+                my = (ny * snapFactor * g_snapStrength * g_stickyStrength) + hb;
+                g_stableCounter = 0;
+            }
+        } else {
+            g_stableCounter = 0;
+        }
+    } else {
+        g_stableCounter = 0;
+    }
+
+    // Clamp
     if (mx > 500) mx = 500; if (mx < -500) mx = -500;
     if (my > 500) my = 500; if (my < -500) my = -500;
+
+    // Lưu state
+    g_prevX = mx;
+    g_prevY = my;
+    g_lastSentX = mx;
+    g_lastSentY = my;
 
     *ox = (int)(g_centerX + mx);
     *oy = (int)(g_centerY + my);
     *ok = true;
+}
+
+static void applyBulletStraight(float* recoil, float* spread) {
+    if (g_noRecoil) *recoil *= g_recoilMult;
+    if (g_noSpread) *spread *= g_spreadMult;
 }
 
 static void* aimLoop(void*) {
@@ -213,6 +269,9 @@ static void* aimLoop(void*) {
 
         int fd = (g_inputFd >= 0) ? g_inputFd : g_uinputFd;
 
+        float recoil = 0.0f, spread = 0.0f;
+        applyBulletStraight(&recoil, &spread);
+
         if (has) {
             int ox, oy; bool ok;
             computeHeadLock(tx, ty, &ox, &oy, &ok);
@@ -221,13 +280,17 @@ static void* aimLoop(void*) {
                     touchDown(fd, (int)g_centerX, (int)g_centerY, tid++);
                     touching = true;
                 }
+                ox += (int)recoil;
+                oy += (int)spread;
                 touchMove(fd, ox, oy);
             }
         } else if (touching && fd >= 0) {
             touchUp(fd);
             touching = false;
-            g_smoothX = 0;
-            g_smoothY = 0;
+            g_smoothX = 0; g_smoothY = 0;
+            g_prevX = 0; g_prevY = 0;
+            g_lastSentX = 0; g_lastSentY = 0;
+            g_stableCounter = 0;
         }
         usleep(delayUs);
     }
@@ -241,7 +304,7 @@ static void* aimLoop(void*) {
 
 __attribute__((constructor))
 static void onLoad() {
-    LOGI("=== AimLock S7 NoRoot loaded ===");
+    LOGI("=== AimLock Smooth + NoShake + NoOvershoot loaded ===");
     readDeviceProps();
     sleep(5);
 
@@ -263,13 +326,13 @@ static void onLoad() {
     g_inputFd = openInputDevice();
     if (g_inputFd < 0) g_uinputFd = createUinput();
     if (g_inputFd < 0 && g_uinputFd < 0) {
-        LOGE("Khong mo duoc input device - can chay trong X8 Sandbox");
+        LOGE("Khong mo duoc input");
         return;
     }
 
     g_running = true;
     pthread_create(&g_thread, nullptr, aimLoop, nullptr);
-    LOGI("AimLock S7 da bat");
+    LOGI("AimLock da bat");
 
     pthread_mutex_lock(&g_mutex);
     g_targetX = g_centerX;
@@ -315,6 +378,13 @@ JNIEXPORT void JNICALL Java_com_aimlock_Native_setHeadLockConfig(JNIEnv*, jclass
 JNIEXPORT void JNICALL Java_com_aimlock_Native_setDragSmooth(JNIEnv*, jclass,
     jfloat smooth, jfloat pressure) {
     g_dragSmooth = smooth; g_touchPressure = pressure;
+}
+JNIEXPORT void JNICALL Java_com_aimlock_Native_setStabilizeConfig(JNIEnv*, jclass,
+    jfloat damping, jfloat overshoot, jint stabCount, jfloat stabRadius) {
+    g_damping = damping;
+    g_overshootLimit = overshoot;
+    g_stabilizeCount = stabCount;
+    g_stabilizeRadius = stabRadius;
 }
 JNIEXPORT void JNICALL Java_com_aimlock_Native_setBulletStraight(JNIEnv*, jclass,
     jint noRecoil, jint noSpread, jfloat recoilMult, jfloat spreadMult) {
