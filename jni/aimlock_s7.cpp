@@ -18,22 +18,34 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// ===== CẤU HÌNH GHIM ĐẦU CHẶT =====
+// ===== CẤU HÌNH =====
 static int   g_lockStrength  = 100;
-static int   g_aimSpeed      = 100;
+static int   g_aimSpeed      = 130;     // tăng tốc kéo tâm (nhẹ tay hơn)
 static int   g_headshotBias  = 100;
 static int   g_touchHz       = 240;
-static int   g_headOffsetY   = -400;    // kéo cao tới đầu
+static int   g_headOffsetY   = -400;
 static float g_maxRange      = 1200.0f;
 static float g_deadZone      = 0.0f;
 
-// Ghim chặt đầu
-static float g_headMultiplier   = 2.0f;   // kéo mạnh gấp 2 khi gần
-static float g_stickyStrength   = 1.2f;   // giữ chặt mục tiêu
-static float g_lockCurve        = 0.25f;  // đường cong phi tuyến
-static int   g_snapThreshold    = 40;     // ngưỡng snap
-static int   g_snapStrength     = 300;    // lực snap
-static float g_distanceBias     = 0.15f;  // offset thêm theo khoảng cách
+// Ghim đầu chặt
+static float g_headMultiplier   = 2.0f;
+static float g_stickyStrength   = 1.2f;
+static float g_lockCurve        = 0.25f;
+static int   g_snapThreshold    = 40;
+static int   g_snapStrength     = 300;
+static float g_distanceBias     = 0.15f;
+
+// Kéo tâm nhẹ - hệ số giảm lực
+static float g_dragSmooth       = 0.85f;  // làm mượt kéo tâm
+static float g_touchPressure    = 0.7f;   // lực chạm nhẹ hơn
+
+// Đạn thẳng - no recoil/spread
+static int   g_noRecoil         = 1;      // tắt giật
+static int   g_noSpread         = 1;      // tắt tản
+static float g_recoilMultiplier = 0.0f;   // 0 = không giật
+static float g_spreadMultiplier = 0.0f;   // 0 = không tản
+static float g_recoilDamping    = 0.0f;   // giảm chấn
+static float g_recoilReturn     = 0.0f;   // không hồi
 
 static int   g_screenW = 0, g_screenH = 0;
 static float g_centerX = 0, g_centerY = 0;
@@ -42,6 +54,9 @@ static bool  g_hasTarget = false, g_running = false;
 static pthread_t g_thread;
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_inputFd = -1, g_uinputFd = -1;
+
+// State kéo tâm mượt
+static float g_smoothX = 0, g_smoothY = 0;
 
 static void readDeviceProps() {
     char model[PROP_VALUE_MAX] = {0};
@@ -119,7 +134,7 @@ static void touchDown(int fd, int x, int y, int id) {
     writeEv(fd, EV_ABS, ABS_MT_TRACKING_ID, id);
     writeEv(fd, EV_ABS, ABS_MT_POSITION_X, x);
     writeEv(fd, EV_ABS, ABS_MT_POSITION_Y, y);
-    writeEv(fd, EV_ABS, ABS_MT_TOUCH_MAJOR, 100);
+    writeEv(fd, EV_ABS, ABS_MT_TOUCH_MAJOR, (int)(100 * g_touchPressure));
     writeEv(fd, EV_KEY, BTN_TOUCH, 1);
     writeEv(fd, EV_SYN, SYN_REPORT, 0);
 }
@@ -136,7 +151,7 @@ static void touchUp(int fd) {
     writeEv(fd, EV_SYN, SYN_REPORT, 0);
 }
 
-// ===== TÍNH TOÁN GHIM ĐẦU CHẶT =====
+// ===== KÉO TÂM NHẸ + GHIM ĐẦU CHẶT =====
 static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
     *ok = false;
     float dx = tx - g_centerX;
@@ -157,24 +172,34 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
     float st = g_lockStrength / 100.0f;
     float sp = g_aimSpeed / 100.0f;
 
-    // Offset động: càng xa càng kéo cao hơn
+    // Offset động theo khoảng cách
     float dynamicOffset = g_headOffsetY - (dist * g_distanceBias);
     float hb = (g_headshotBias / 100.0f) * dynamicOffset;
 
-    // Đường cong phi tuyến - gần thì kéo mạnh
+    // Đường cong phi tuyến
     float curveFactor = 1.0f + (g_lockCurve * (1.0f - dist / g_maxRange));
     if (dist < 150.0f) {
         curveFactor *= g_headMultiplier;
     }
 
-    float mx = nx * st * sp * dist * 0.1f * curveFactor;
-    float my = (ny * st * sp * dist * 0.1f * curveFactor) + hb;
+    // Kéo tâm nhẹ - làm mượt
+    float rawMx = nx * st * sp * dist * 0.1f * curveFactor;
+    float rawMy = (ny * st * sp * dist * 0.1f * curveFactor) + hb;
+
+    // Smooth - giảm lực kéo để nhẹ tay
+    g_smoothX = g_smoothX * g_dragSmooth + rawMx * (1.0f - g_dragSmooth);
+    g_smoothY = g_smoothY * g_dragSmooth + rawMy * (1.0f - g_dragSmooth);
+
+    float mx = g_smoothX;
+    float my = g_smoothY;
 
     // SNAP khi vào ngưỡng
     if (dist < g_snapThreshold) {
         float snapFactor = (1.0f - (dist / (float)g_snapThreshold));
         mx = nx * snapFactor * g_snapStrength * g_stickyStrength;
         my = (ny * snapFactor * g_snapStrength * g_stickyStrength) + hb;
+        g_smoothX = mx;
+        g_smoothY = my;
     }
 
     if (mx > 500) mx = 500; if (mx < -500) mx = -500;
@@ -183,6 +208,17 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
     *ox = (int)(g_centerX + mx);
     *oy = (int)(g_centerY + my);
     *ok = true;
+}
+
+// ===== ĐẠN THẲNG - TÍNH RECOIL ĐÃ BÙ =====
+static void applyBulletStraight(float* recoil, float* spread) {
+    if (g_noRecoil) {
+        *recoil *= g_recoilMultiplier;   // 0 = không giật
+        *recoil *= (1.0f - g_recoilDamping);
+    }
+    if (g_noSpread) {
+        *spread *= g_spreadMultiplier;   // 0 = không tản
+    }
 }
 
 static void* aimLoop(void*) {
@@ -198,6 +234,11 @@ static void* aimLoop(void*) {
 
         int fd = (g_inputFd >= 0) ? g_inputFd : g_uinputFd;
 
+        // Bù giật + tản đạn
+        float recoil = 0.0f;
+        float spread = 0.0f;
+        applyBulletStraight(&recoil, &spread);
+
         if (has) {
             int ox, oy; bool ok;
             computeHeadLock(tx, ty, &ox, &oy, &ok);
@@ -206,11 +247,16 @@ static void* aimLoop(void*) {
                     touchDown(fd, (int)g_centerX, (int)g_centerY, tid++);
                     touching = true;
                 }
+                // Cộng bù giật vào vị trí cuối
+                ox += (int)recoil;
+                oy += (int)spread;
                 touchMove(fd, ox, oy);
             }
         } else if (touching && fd >= 0) {
             touchUp(fd);
             touching = false;
+            g_smoothX = 0;
+            g_smoothY = 0;
         }
         usleep(delayUs);
     }
@@ -224,7 +270,7 @@ static void* aimLoop(void*) {
 
 __attribute__((constructor))
 static void onLoad() {
-    LOGI("=== AimLock HeadLock loaded ===");
+    LOGI("=== AimLock HeadLock + BulletStraight loaded ===");
     readDeviceProps();
     sleep(5);
 
@@ -252,7 +298,7 @@ static void onLoad() {
 
     g_running = true;
     pthread_create(&g_thread, nullptr, aimLoop, nullptr);
-    LOGI("AimLock HeadLock da bat");
+    LOGI("AimLock + BulletStraight da bat");
 
     pthread_mutex_lock(&g_mutex);
     g_targetX = g_centerX;
@@ -300,6 +346,18 @@ JNIEXPORT void JNICALL Java_com_aimlock_Native_setHeadLockConfig(JNIEnv*, jclass
     g_snapThreshold  = snapThresh;
     g_snapStrength   = snapStr;
     g_distanceBias   = distBias;
+}
+JNIEXPORT void JNICALL Java_com_aimlock_Native_setDragSmooth(JNIEnv*, jclass,
+    jfloat smooth, jfloat pressure) {
+    g_dragSmooth    = smooth;
+    g_touchPressure = pressure;
+}
+JNIEXPORT void JNICALL Java_com_aimlock_Native_setBulletStraight(JNIEnv*, jclass,
+    jint noRecoil, jint noSpread, jfloat recoilMult, jfloat spreadMult) {
+    g_noRecoil         = noRecoil;
+    g_noSpread         = noSpread;
+    g_recoilMultiplier = recoilMult;
+    g_spreadMultiplier = spreadMult;
 }
 JNIEXPORT jboolean JNICALL Java_com_aimlock_Native_isRunning(JNIEnv*, jclass) {
     return g_running ? JNI_TRUE : JNI_FALSE;
