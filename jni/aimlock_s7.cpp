@@ -23,16 +23,17 @@ static int   g_lockStrength  = 100;
 static int   g_aimSpeed      = 100;
 static int   g_headshotBias  = 100;
 static int   g_touchHz       = 240;
-static int   g_headOffsetY   = -80;    // kéo cao hơn về phía đầu
+static int   g_headOffsetY   = -400;    // kéo cao tới đầu
 static float g_maxRange      = 1200.0f;
 static float g_deadZone      = 0.0f;
 
 // Ghim chặt đầu
-static float g_headMultiplier   = 1.5f;   // kéo mạnh hơn khi gần đầu
-static float g_stickyStrength   = 1.0f;   // giữ chặt mục tiêu
-static float g_lockCurve        = 0.15f;  // đường cong kéo (phi tuyến tính)
-static int   g_snapThreshold    = 25;     // khoảng cách để "dính chặt"
-static int   g_snapStrength     = 200;    // lực snap khi trong ngưỡng
+static float g_headMultiplier   = 2.0f;   // kéo mạnh gấp 2 khi gần
+static float g_stickyStrength   = 1.2f;   // giữ chặt mục tiêu
+static float g_lockCurve        = 0.25f;  // đường cong phi tuyến
+static int   g_snapThreshold    = 40;     // ngưỡng snap
+static int   g_snapStrength     = 300;    // lực snap
+static float g_distanceBias     = 0.15f;  // offset thêm theo khoảng cách
 
 static int   g_screenW = 0, g_screenH = 0;
 static float g_centerX = 0, g_centerY = 0;
@@ -150,35 +151,34 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
         return;
     }
 
-    // Vector đơn vị
     float nx = dx / dist;
     float ny = dy / dist;
 
-    // Hệ số cơ bản
     float st = g_lockStrength / 100.0f;
     float sp = g_aimSpeed / 100.0f;
-    float hb = (g_headshotBias / 100.0f) * g_headOffsetY;
 
-    // Đường cong phi tuyến tính - kéo mạnh khi gần, chậm khi xa
+    // Offset động: càng xa càng kéo cao hơn
+    float dynamicOffset = g_headOffsetY - (dist * g_distanceBias);
+    float hb = (g_headshotBias / 100.0f) * dynamicOffset;
+
+    // Đường cong phi tuyến - gần thì kéo mạnh
     float curveFactor = 1.0f + (g_lockCurve * (1.0f - dist / g_maxRange));
-    if (dist < 100.0f) {
+    if (dist < 150.0f) {
         curveFactor *= g_headMultiplier;
     }
 
     float mx = nx * st * sp * dist * 0.1f * curveFactor;
     float my = (ny * st * sp * dist * 0.1f * curveFactor) + hb;
 
-    // SNAP - DÍNH CHẶT khi trong ngưỡng
+    // SNAP khi vào ngưỡng
     if (dist < g_snapThreshold) {
-        // Kéo gần như tức thời về target
         float snapFactor = (1.0f - (dist / (float)g_snapThreshold));
         mx = nx * snapFactor * g_snapStrength * g_stickyStrength;
         my = (ny * snapFactor * g_snapStrength * g_stickyStrength) + hb;
     }
 
-    // Clamp
-    if (mx > 400) mx = 400; if (mx < -400) mx = -400;
-    if (my > 400) my = 400; if (my < -400) my = -400;
+    if (mx > 500) mx = 500; if (mx < -500) mx = -500;
+    if (my > 500) my = 500; if (my < -500) my = -500;
 
     *ox = (int)(g_centerX + mx);
     *oy = (int)(g_centerY + my);
@@ -254,7 +254,6 @@ static void onLoad() {
     pthread_create(&g_thread, nullptr, aimLoop, nullptr);
     LOGI("AimLock HeadLock da bat");
 
-    // Demo target - có thể thay bằng setTarget() từ vision module
     pthread_mutex_lock(&g_mutex);
     g_targetX = g_centerX;
     g_targetY = g_centerY - 300;
@@ -293,12 +292,14 @@ JNIEXPORT void JNICALL Java_com_aimlock_Native_setConfig(JNIEnv*, jclass,
     g_headOffsetY  = hoy;
 }
 JNIEXPORT void JNICALL Java_com_aimlock_Native_setHeadLockConfig(JNIEnv*, jclass,
-    jfloat headMult, jfloat sticky, jfloat curve, jint snapThresh, jint snapStr) {
+    jfloat headMult, jfloat sticky, jfloat curve, jint snapThresh,
+    jint snapStr, jfloat distBias) {
     g_headMultiplier = headMult;
     g_stickyStrength = sticky;
     g_lockCurve      = curve;
     g_snapThreshold  = snapThresh;
     g_snapStrength   = snapStr;
+    g_distanceBias   = distBias;
 }
 JNIEXPORT jboolean JNICALL Java_com_aimlock_Native_isRunning(JNIEnv*, jclass) {
     return g_running ? JNI_TRUE : JNI_FALSE;
