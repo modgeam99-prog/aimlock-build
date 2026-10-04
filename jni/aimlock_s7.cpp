@@ -18,36 +18,47 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// ===== CẤU HÌNH =====
-static int   g_lockStrength   = 100;
-static int   g_aimSpeed       = 140;      // tăng tốc kéo tâm nhẹ
-static int   g_headshotBias   = 100;
-static int   g_touchHz        = 240;
-static int   g_headOffsetY    = -400;
-static float g_maxRange       = 1500.0f;
-static float g_deadZone       = 12.0f;    // vùng chết - fix rung tâm
+// ===== CẤU HÌNH LIA ĐẦU CỰC ẢO =====
+static int   g_lockStrength    = 100;
+static int   g_aimSpeed        = 200;      // kéo cực nhanh
+static int   g_headshotBias    = 100;
+static int   g_touchHz         = 240;
+static int   g_headOffsetY     = -450;     // ghim cao tới đỉnh đầu
+static float g_maxRange        = 2000.0f;  // lia xa
+static float g_deadZone        = 5.0f;     // vùng chết nhỏ
 
-// Ghim đầu
-static float g_headMultiplier = 2.0f;
-static float g_stickyStrength = 1.2f;
-static float g_lockCurve      = 0.25f;
-static int   g_snapThreshold  = 40;
-static int   g_snapStrength   = 300;
-static float g_distanceBias   = 0.15f;
+// Lia đầu
+static float g_headMultiplier  = 3.0f;     // kéo mạnh gấp 3 khi gần đầu
+static float g_stickyStrength  = 2.0f;     // bám chặt cực mạnh
+static float g_lockCurve       = 0.35f;    // cong hơn
+static int   g_snapThreshold   = 80;       // snap xa hơn
+static int   g_snapStrength    = 500;      // snap cực mạnh
+static float g_distanceBias    = 0.22f;    // offset theo khoảng cách
 
-// Kéo tâm nhẹ - fix rung
-static float g_dragSmooth     = 0.75f;    // giảm để nhẹ tay hơn
-static float g_touchPressure  = 0.6f;     // lực chạm nhẹ
-static float g_damping        = 0.85f;    // giảm chấn - chống rung
-static float g_overshootLimit = 0.3f;     // giới hạn vượt - fix lố đầu
-static int   g_stabilizeCount = 3;        // số frame ổn định trước khi snap
-static float g_stabilizeRadius= 5.0f;     // bán kính ổn định (px)
+// Lia cực ảo - prediction
+static float g_predictionFactor= 0.35f;    // dự đoán hướng đi
+static int   g_predictionFrames= 4;        // frame để dự đoán
+static float g_liaSmoothing    = 0.65f;    // làm mượt lia
+static float g_liaDamping      = 0.92f;    // giảm chấn
+static float g_liaMaxSpeed     = 800.0f;   // tốc độ lia tối đa (px/frame)
+static float g_liaAccel        = 1.8f;     // gia tốc lia
+static float g_liaDecel        = 0.75f;    // giảm tốc lia
+
+// Chống lố + chống rung
+static float g_overshootLimit  = 0.15f;    // giới hạn vượt chặt hơn
+static int   g_stabilizeCount  = 2;        // ổn định 2 frame là snap
+static float g_stabilizeRadius = 3.0f;
 
 // Đạn thẳng
-static int   g_noRecoil       = 1;
-static int   g_noSpread       = 1;
-static float g_recoilMult     = 0.0f;
-static float g_spreadMult     = 0.0f;
+static int   g_noRecoil        = 1;
+static int   g_noSpread        = 1;
+static float g_recoilMult      = 0.0f;
+static float g_spreadMult      = 0.0f;
+
+// Auto drag head - tự động kéo lên đầu khi bắn
+static int   g_autoDragHead    = 1;
+static float g_autoDragY       = -25.0f;   // kéo lên 25px mỗi frame khi bắn
+static float g_autoDragMax     = -120.0f;  // kéo tối đa
 
 static int   g_screenW = 0, g_screenH = 0;
 static float g_centerX = 0, g_centerY = 0;
@@ -57,18 +68,23 @@ static pthread_t g_thread;
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_inputFd = -1, g_uinputFd = -1;
 
-// State chống rung + chống lố
+// State lia
 static float g_smoothX = 0, g_smoothY = 0;
 static float g_prevX = 0, g_prevY = 0;
-static int   g_stableCounter = 0;
+static float g_velocityX = 0, g_velocityY = 0;
 static float g_lastSentX = 0, g_lastSentY = 0;
+static int   g_stableCounter = 0;
+static float g_autoDragAccum = 0.0f;
+
+// Lịch sử target để dự đoán
+static float g_targetHistoryX[8] = {0};
+static float g_targetHistoryY[8] = {0};
+static int   g_historyIndex = 0;
 
 static void readDeviceProps() {
     char model[PROP_VALUE_MAX] = {0};
-    char androidVer[PROP_VALUE_MAX] = {0};
     __system_property_get("ro.product.model", model);
-    __system_property_get("ro.build.version.release", androidVer);
-    LOGI("Device: %s | Android: %s", model, androidVer);
+    LOGI("Device: %s", model);
 }
 
 static int openInputDevice() {
@@ -94,10 +110,7 @@ static int openInputDevice() {
 
 static int createUinput() {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
-    if (fd < 0) {
-        LOGE("Khong mo duoc /dev/uinput");
-        return -1;
-    }
+    if (fd < 0) return -1;
     ioctl(fd, UI_SET_EVBIT, EV_ABS);
     ioctl(fd, UI_SET_EVBIT, EV_KEY);
     ioctl(fd, UI_SET_EVBIT, EV_SYN);
@@ -124,7 +137,6 @@ static int createUinput() {
     uidev.absmax[ABS_MT_TOUCH_MAJOR] = 255;
     write(fd, &uidev, sizeof(uidev));
     ioctl(fd, UI_DEV_CREATE);
-    LOGI("Da tao uinput");
     return fd;
 }
 
@@ -141,7 +153,7 @@ static void touchDown(int fd, int x, int y, int id) {
     writeEv(fd, EV_ABS, ABS_MT_TRACKING_ID, id);
     writeEv(fd, EV_ABS, ABS_MT_POSITION_X, x);
     writeEv(fd, EV_ABS, ABS_MT_POSITION_Y, y);
-    writeEv(fd, EV_ABS, ABS_MT_TOUCH_MAJOR, (int)(100 * g_touchPressure));
+    writeEv(fd, EV_ABS, ABS_MT_TOUCH_MAJOR, 80);
     writeEv(fd, EV_KEY, BTN_TOUCH, 1);
     writeEv(fd, EV_SYN, SYN_REPORT, 0);
 }
@@ -158,14 +170,48 @@ static void touchUp(int fd) {
     writeEv(fd, EV_SYN, SYN_REPORT, 0);
 }
 
-// ===== TÍNH TOÁN GHIM ĐẦU NHẸ TAY =====
+// ===== DỰ ĐOÁN HƯỚNG MỤC TIÊU =====
+static void predictTarget(float* predX, float* predY) {
+    // Lưu lịch sử
+    g_targetHistoryX[g_historyIndex] = g_targetX;
+    g_targetHistoryY[g_historyIndex] = g_targetY;
+    g_historyIndex = (g_historyIndex + 1) % 8;
+
+    // Tính vận tốc trung bình
+    float sumDX = 0, sumDY = 0;
+    int count = 0;
+    for (int i = 0; i < g_predictionFrames && i < 7; i++) {
+        int cur = (g_historyIndex - 1 - i + 8) % 8;
+        int prev = (g_historyIndex - 2 - i + 8) % 8;
+        sumDX += g_targetHistoryX[cur] - g_targetHistoryX[prev];
+        sumDY += g_targetHistoryY[cur] - g_targetHistoryY[prev];
+        count++;
+    }
+
+    if (count > 0) {
+        float vx = sumDX / count;
+        float vy = sumDY / count;
+        *predX = g_targetX + vx * g_predictionFactor * g_predictionFrames;
+        *predY = g_targetY + vy * g_predictionFactor * g_predictionFrames;
+    } else {
+        *predX = g_targetX;
+        *predY = g_targetY;
+    }
+}
+
+// ===== LIA ĐẦU CỰC ẢO =====
 static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
     *ok = false;
-    float dx = tx - g_centerX;
-    float dy = ty - g_centerY;
+
+    // Dự đoán vị trí mục tiêu
+    float predX, predY;
+    predictTarget(&predX, &predY);
+
+    float dx = predX - g_centerX;
+    float dy = predY - g_centerY;
     float dist = sqrtf(dx*dx + dy*dy);
 
-    // VÙNG CHẾT - fix rung tâm khi tâm đã gần mục tiêu
+    // Vùng chết
     if (dist < g_deadZone) {
         *ox = (int)(g_centerX + g_lastSentX);
         *oy = (int)(g_centerY + g_lastSentY);
@@ -180,42 +226,64 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
     float st = g_lockStrength / 100.0f;
     float sp = g_aimSpeed / 100.0f;
 
-    // Offset động theo khoảng cách
+    // Offset theo khoảng cách
     float dynamicOffset = g_headOffsetY - (dist * g_distanceBias);
     float hb = (g_headshotBias / 100.0f) * dynamicOffset;
 
-    // Curve factor
+    // Curve mạnh gần đầu
     float curveFactor = 1.0f + (g_lockCurve * (1.0f - dist / g_maxRange));
-    if (dist < 150.0f) curveFactor *= g_headMultiplier;
+    if (dist < 200.0f) curveFactor *= g_headMultiplier;
 
-    // Kéo tâm thô
-    float rawMx = nx * st * sp * dist * 0.1f * curveFactor;
-    float rawMy = (ny * st * sp * dist * 0.1f * curveFactor) + hb;
+    // Vận tốc mục tiêu
+    float targetVelX = nx * sp * dist * 0.1f * curveFactor;
+    float targetVelY = (ny * sp * dist * 0.1f * curveFactor) + hb;
 
-    // LÀM MƯỢT - nhẹ tay
-    g_smoothX = g_smoothX * g_dragSmooth + rawMx * (1.0f - g_dragSmooth);
-    g_smoothY = g_smoothY * g_dragSmooth + rawMy * (1.0f - g_dragSmooth);
+    // Gia tốc lia
+    g_velocityX += (targetVelX - g_velocityX) * g_liaAccel;
+    g_velocityY += (targetVelY - g_velocityY) * g_liaAccel;
 
-    // GIẢM CHẤN - chống rung
-    g_smoothX *= g_damping;
-    g_smoothY *= g_damping;
+    // Giới hạn tốc độ lia
+    if (g_velocityX > g_liaMaxSpeed) g_velocityX = g_liaMaxSpeed;
+    if (g_velocityX < -g_liaMaxSpeed) g_velocityX = -g_liaMaxSpeed;
+    if (g_velocityY > g_liaMaxSpeed) g_velocityY = g_liaMaxSpeed;
+    if (g_velocityY < -g_liaMaxSpeed) g_velocityY = -g_liaMaxSpeed;
+
+    // Giảm tốc
+    g_velocityX *= g_liaDecel;
+    g_velocityY *= g_liaDecel;
+
+    // Làm mượt
+    g_smoothX = g_smoothX * g_liaSmoothing + (g_velocityX) * (1.0f - g_liaSmoothing);
+    g_smoothY = g_smoothY * g_liaSmoothing + (g_velocityY) * (1.0f - g_liaSmoothing);
+
+    // Giảm chấn
+    g_smoothX *= g_liaDamping;
+    g_smoothY *= g_liaDamping;
 
     float mx = g_smoothX;
     float my = g_smoothY;
 
-    // GIỚI HẠN VƯỢT - fix lố đầu
+    // Auto drag head khi bắn
+    if (g_autoDragHead) {
+        if (g_autoDragAccum > g_autoDragMax) {
+            g_autoDragAccum += g_autoDragY;
+            my += g_autoDragY;
+        }
+    }
+
+    // Giới hạn vượt
     float dxMove = mx - g_prevX;
     float dyMove = my - g_prevY;
     float moveDist = sqrtf(dxMove*dxMove + dyMove*dyMove);
-    float targetDist = dist * g_overshootLimit;
+    float maxMove = dist * g_overshootLimit;
 
-    if (moveDist > targetDist && targetDist > 0) {
-        float scale = targetDist / moveDist;
+    if (moveDist > maxMove && maxMove > 0) {
+        float scale = maxMove / moveDist;
         mx = g_prevX + dxMove * scale;
         my = g_prevY + dyMove * scale;
     }
 
-    // SNAP với ổn định - chỉ snap khi đã đứng yên
+    // SNAP LIA ĐẦU
     if (dist < g_snapThreshold) {
         float dxStable = fabsf(mx - g_prevX);
         float dyStable = fabsf(my - g_prevY);
@@ -223,10 +291,19 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
         if (dxStable < g_stabilizeRadius && dyStable < g_stabilizeRadius) {
             g_stableCounter++;
             if (g_stableCounter >= g_stabilizeCount) {
-                // Đã ổn định - snap về đúng đầu
+                // SNAP cực mạnh
                 float snapFactor = (1.0f - (dist / (float)g_snapThreshold));
-                mx = nx * snapFactor * g_snapStrength * g_stickyStrength;
-                my = (ny * snapFactor * g_snapStrength * g_stickyStrength) + hb;
+                float snapX = nx * snapFactor * g_snapStrength * g_stickyStrength;
+                float snapY = (ny * snapFactor * g_snapStrength * g_stickyStrength) + hb;
+
+                // Lia cực ảo - nhảy tức thời
+                mx = snapX;
+                my = snapY;
+
+                // Reset velocity để không vượt
+                g_velocityX = 0;
+                g_velocityY = 0;
+
                 g_stableCounter = 0;
             }
         } else {
@@ -237,8 +314,8 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
     }
 
     // Clamp
-    if (mx > 500) mx = 500; if (mx < -500) mx = -500;
-    if (my > 500) my = 500; if (my < -500) my = -500;
+    if (mx > 700) mx = 700; if (mx < -700) mx = -700;
+    if (my > 700) my = 700; if (my < -700) my = -700;
 
     // Lưu state
     g_prevX = mx;
@@ -249,11 +326,6 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
     *ox = (int)(g_centerX + mx);
     *oy = (int)(g_centerY + my);
     *ok = true;
-}
-
-static void applyBulletStraight(float* recoil, float* spread) {
-    if (g_noRecoil) *recoil *= g_recoilMult;
-    if (g_noSpread) *spread *= g_spreadMult;
 }
 
 static void* aimLoop(void*) {
@@ -269,9 +341,6 @@ static void* aimLoop(void*) {
 
         int fd = (g_inputFd >= 0) ? g_inputFd : g_uinputFd;
 
-        float recoil = 0.0f, spread = 0.0f;
-        applyBulletStraight(&recoil, &spread);
-
         if (has) {
             int ox, oy; bool ok;
             computeHeadLock(tx, ty, &ox, &oy, &ok);
@@ -280,8 +349,6 @@ static void* aimLoop(void*) {
                     touchDown(fd, (int)g_centerX, (int)g_centerY, tid++);
                     touching = true;
                 }
-                ox += (int)recoil;
-                oy += (int)spread;
                 touchMove(fd, ox, oy);
             }
         } else if (touching && fd >= 0) {
@@ -289,8 +356,10 @@ static void* aimLoop(void*) {
             touching = false;
             g_smoothX = 0; g_smoothY = 0;
             g_prevX = 0; g_prevY = 0;
+            g_velocityX = 0; g_velocityY = 0;
             g_lastSentX = 0; g_lastSentY = 0;
             g_stableCounter = 0;
+            g_autoDragAccum = 0;
         }
         usleep(delayUs);
     }
@@ -304,7 +373,7 @@ static void* aimLoop(void*) {
 
 __attribute__((constructor))
 static void onLoad() {
-    LOGI("=== AimLock Smooth + NoShake + NoOvershoot loaded ===");
+    LOGI("=== AimLock Lia Dau Cuc Ao loaded ===");
     readDeviceProps();
     sleep(5);
 
@@ -375,21 +444,22 @@ JNIEXPORT void JNICALL Java_com_aimlock_Native_setHeadLockConfig(JNIEnv*, jclass
     g_lockCurve = curve; g_snapThreshold = snapThresh;
     g_snapStrength = snapStr; g_distanceBias = distBias;
 }
-JNIEXPORT void JNICALL Java_com_aimlock_Native_setDragSmooth(JNIEnv*, jclass,
-    jfloat smooth, jfloat pressure) {
-    g_dragSmooth = smooth; g_touchPressure = pressure;
+JNIEXPORT void JNICALL Java_com_aimlock_Native_setLiaConfig(JNIEnv*, jclass,
+    jfloat prediction, jint predFrames, jfloat smoothing, jfloat damping,
+    jfloat maxSpeed, jfloat accel, jfloat decel) {
+    g_predictionFactor = prediction;
+    g_predictionFrames = predFrames;
+    g_liaSmoothing     = smoothing;
+    g_liaDamping       = damping;
+    g_liaMaxSpeed      = maxSpeed;
+    g_liaAccel         = accel;
+    g_liaDecel         = decel;
 }
-JNIEXPORT void JNICALL Java_com_aimlock_Native_setStabilizeConfig(JNIEnv*, jclass,
-    jfloat damping, jfloat overshoot, jint stabCount, jfloat stabRadius) {
-    g_damping = damping;
-    g_overshootLimit = overshoot;
-    g_stabilizeCount = stabCount;
-    g_stabilizeRadius = stabRadius;
-}
-JNIEXPORT void JNICALL Java_com_aimlock_Native_setBulletStraight(JNIEnv*, jclass,
-    jint noRecoil, jint noSpread, jfloat recoilMult, jfloat spreadMult) {
-    g_noRecoil = noRecoil; g_noSpread = noSpread;
-    g_recoilMult = recoilMult; g_spreadMult = spreadMult;
+JNIEXPORT void JNICALL Java_com_aimlock_Native_setAutoDragHead(JNIEnv*, jclass,
+    jint enable, jfloat dragY, jfloat dragMax) {
+    g_autoDragHead = enable;
+    g_autoDragY    = dragY;
+    g_autoDragMax  = dragMax;
 }
 JNIEXPORT jboolean JNICALL Java_com_aimlock_Native_isRunning(JNIEnv*, jclass) {
     return g_running ? JNI_TRUE : JNI_FALSE;
