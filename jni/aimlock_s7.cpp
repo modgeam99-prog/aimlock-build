@@ -1,7 +1,3 @@
-// File: jni/aimlock_s7.cpp
-// Build qua GitHub Actions → libaimlock.so
-// Aimlock tối ưu cho Samsung Galaxy S7 - KHÔNG ROOT
-// Nạp runtime qua Frida / X8 Sandbox vào Free Fire / Free Fire MAX
 
 #include <jni.h>
 #include <android/log.h>
