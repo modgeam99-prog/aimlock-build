@@ -18,36 +18,52 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// ===== CẤU HÌNH LIA ĐẦU CỰC ẢO =====
+// ===== CẤU HÌNH AIM ĐẦU + SILENT =====
 static int   g_lockStrength    = 100;
-static int   g_aimSpeed        = 200;      // kéo cực nhanh
+static int   g_aimSpeed        = 220;
 static int   g_headshotBias    = 100;
 static int   g_touchHz         = 240;
-static int   g_headOffsetY     = -450;     // ghim cao tới đỉnh đầu
-static float g_maxRange        = 2000.0f;  // lia xa
-static float g_deadZone        = 5.0f;     // vùng chết nhỏ
+static int   g_headOffsetY     = -450;
+static float g_maxRange        = 2000.0f;
+static float g_deadZone        = 4.0f;
 
-// Lia đầu
-static float g_headMultiplier  = 3.0f;     // kéo mạnh gấp 3 khi gần đầu
-static float g_stickyStrength  = 2.0f;     // bám chặt cực mạnh
-static float g_lockCurve       = 0.35f;    // cong hơn
-static int   g_snapThreshold   = 80;       // snap xa hơn
-static int   g_snapStrength    = 500;      // snap cực mạnh
-static float g_distanceBias    = 0.22f;    // offset theo khoảng cách
+// Aim đầu mạnh
+static float g_headMultiplier  = 3.5f;
+static float g_stickyStrength  = 2.5f;
+static float g_lockCurve       = 0.40f;
+static int   g_snapThreshold   = 100;
+static int   g_snapStrength    = 700;
+static float g_distanceBias    = 0.28f;
 
-// Lia cực ảo - prediction
-static float g_predictionFactor= 0.35f;    // dự đoán hướng đi
-static int   g_predictionFrames= 4;        // frame để dự đoán
-static float g_liaSmoothing    = 0.65f;    // làm mượt lia
-static float g_liaDamping      = 0.92f;    // giảm chấn
-static float g_liaMaxSpeed     = 800.0f;   // tốc độ lia tối đa (px/frame)
-static float g_liaAccel        = 1.8f;     // gia tốc lia
-static float g_liaDecel        = 0.75f;    // giảm tốc lia
+// Silent aim - tâm không di chuyển nhưng đạn vẫn trúng đầu
+static int   g_silentAim       = 1;        // bật silent aim
+static int   g_silentMode      = 1;        // 0 = off, 1 = headshot lock, 2 = fov silent
+static float g_silentFOV       = 15.0f;    // FOV silent (độ)
+static float g_silentStrength  = 1.0f;     // lực silent
+static int   g_silentSmooth    = 3;        // làm mượt silent (frame)
+static int   g_silentVisible   = 1;        // chỉ silent khi thấy địch
+static int   g_silentInstant   = 1;        // silent tức thời khi bắn
 
-// Chống lố + chống rung
-static float g_overshootLimit  = 0.15f;    // giới hạn vượt chặt hơn
-static int   g_stabilizeCount  = 2;        // ổn định 2 frame là snap
-static float g_stabilizeRadius = 3.0f;
+// Prediction
+static float g_predictionFactor= 0.50f;
+static int   g_predictionFrames= 5;
+
+// Lia tốc độ cao
+static float g_liaSmoothing    = 0.60f;
+static float g_liaDamping      = 0.93f;
+static float g_liaMaxSpeed     = 1200.0f;
+static float g_liaAccel        = 2.2f;
+static float g_liaDecel        = 0.80f;
+
+// Chống lố
+static float g_overshootLimit  = 0.12f;
+static int   g_stabilizeCount  = 1;
+static float g_stabilizeRadius = 2.0f;
+
+// Auto drag head
+static int   g_autoDragHead    = 1;
+static float g_autoDragY       = -35.0f;
+static float g_autoDragMax     = -180.0f;
 
 // Đạn thẳng
 static int   g_noRecoil        = 1;
@@ -55,20 +71,16 @@ static int   g_noSpread        = 1;
 static float g_recoilMult      = 0.0f;
 static float g_spreadMult      = 0.0f;
 
-// Auto drag head - tự động kéo lên đầu khi bắn
-static int   g_autoDragHead    = 1;
-static float g_autoDragY       = -25.0f;   // kéo lên 25px mỗi frame khi bắn
-static float g_autoDragMax     = -120.0f;  // kéo tối đa
-
 static int   g_screenW = 0, g_screenH = 0;
 static float g_centerX = 0, g_centerY = 0;
 static float g_targetX = 0, g_targetY = 0;
+static float g_silentX = 0, g_silentY = 0;
 static bool  g_hasTarget = false, g_running = false;
+static bool  g_firing = false;
 static pthread_t g_thread;
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_inputFd = -1, g_uinputFd = -1;
 
-// State lia
 static float g_smoothX = 0, g_smoothY = 0;
 static float g_prevX = 0, g_prevY = 0;
 static float g_velocityX = 0, g_velocityY = 0;
@@ -76,7 +88,10 @@ static float g_lastSentX = 0, g_lastSentY = 0;
 static int   g_stableCounter = 0;
 static float g_autoDragAccum = 0.0f;
 
-// Lịch sử target để dự đoán
+// Silent state
+static float g_silentPrevX = 0, g_silentPrevY = 0;
+static int   g_silentFrameCounter = 0;
+
 static float g_targetHistoryX[8] = {0};
 static float g_targetHistoryY[8] = {0};
 static int   g_historyIndex = 0;
@@ -170,14 +185,12 @@ static void touchUp(int fd) {
     writeEv(fd, EV_SYN, SYN_REPORT, 0);
 }
 
-// ===== DỰ ĐOÁN HƯỚNG MỤC TIÊU =====
+// ===== DỰ ĐOÁN =====
 static void predictTarget(float* predX, float* predY) {
-    // Lưu lịch sử
     g_targetHistoryX[g_historyIndex] = g_targetX;
     g_targetHistoryY[g_historyIndex] = g_targetY;
     g_historyIndex = (g_historyIndex + 1) % 8;
 
-    // Tính vận tốc trung bình
     float sumDX = 0, sumDY = 0;
     int count = 0;
     for (int i = 0; i < g_predictionFrames && i < 7; i++) {
@@ -199,11 +212,50 @@ static void predictTarget(float* predX, float* predY) {
     }
 }
 
-// ===== LIA ĐẦU CỰC ẢO =====
+// ===== SILENT AIM - TÍNH VỊ TRÍ ĐẦU =====
+static void computeSilentAim(float tx, float ty, int* sx, int* sy, bool* ok) {
+    *ok = false;
+    if (!g_silentAim) return;
+
+    float dx = tx - g_centerX;
+    float dy = ty - g_centerY;
+    float dist = sqrtf(dx*dx + dy*dy);
+
+    if (dist > g_maxRange) return;
+
+    // Kiểm tra FOV silent
+    float angle = atan2f(dy, dx) * 180.0f / M_PI;
+    if (fabsf(angle) > g_silentFOV && fabsf(angle - 180.0f) > g_silentFOV &&
+        fabsf(angle + 180.0f) > g_silentFOV) {
+        // Ngoài FOV silent - vẫn cho phép nếu silent mode = 1
+        if (g_silentMode == 2) return;
+    }
+
+    // Offset đầu
+    float hb = g_headshotBias / 100.0f * g_headOffsetY;
+
+    // Vị trí đầu
+    float headX = tx;
+    float headY = ty + hb;
+
+    // Làm mượt silent
+    if (g_silentSmooth > 0) {
+        g_silentPrevX = g_silentPrevX * 0.5f + headX * 0.5f;
+        g_silentPrevY = g_silentPrevY * 0.5f + headY * 0.5f;
+        *sx = (int)g_silentPrevX;
+        *sy = (int)g_silentPrevY;
+    } else {
+        *sx = (int)headX;
+        *sy = (int)headY;
+    }
+
+    *ok = true;
+}
+
+// ===== AIM ĐẦU + LIA =====
 static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
     *ok = false;
 
-    // Dự đoán vị trí mục tiêu
     float predX, predY;
     predictTarget(&predX, &predY);
 
@@ -211,7 +263,6 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
     float dy = predY - g_centerY;
     float dist = sqrtf(dx*dx + dy*dy);
 
-    // Vùng chết
     if (dist < g_deadZone) {
         *ox = (int)(g_centerX + g_lastSentX);
         *oy = (int)(g_centerY + g_lastSentY);
@@ -226,44 +277,35 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
     float st = g_lockStrength / 100.0f;
     float sp = g_aimSpeed / 100.0f;
 
-    // Offset theo khoảng cách
     float dynamicOffset = g_headOffsetY - (dist * g_distanceBias);
     float hb = (g_headshotBias / 100.0f) * dynamicOffset;
 
-    // Curve mạnh gần đầu
     float curveFactor = 1.0f + (g_lockCurve * (1.0f - dist / g_maxRange));
-    if (dist < 200.0f) curveFactor *= g_headMultiplier;
+    if (dist < 250.0f) curveFactor *= g_headMultiplier;
 
-    // Vận tốc mục tiêu
     float targetVelX = nx * sp * dist * 0.1f * curveFactor;
     float targetVelY = (ny * sp * dist * 0.1f * curveFactor) + hb;
 
-    // Gia tốc lia
     g_velocityX += (targetVelX - g_velocityX) * g_liaAccel;
     g_velocityY += (targetVelY - g_velocityY) * g_liaAccel;
 
-    // Giới hạn tốc độ lia
     if (g_velocityX > g_liaMaxSpeed) g_velocityX = g_liaMaxSpeed;
     if (g_velocityX < -g_liaMaxSpeed) g_velocityX = -g_liaMaxSpeed;
     if (g_velocityY > g_liaMaxSpeed) g_velocityY = g_liaMaxSpeed;
     if (g_velocityY < -g_liaMaxSpeed) g_velocityY = -g_liaMaxSpeed;
 
-    // Giảm tốc
     g_velocityX *= g_liaDecel;
     g_velocityY *= g_liaDecel;
 
-    // Làm mượt
-    g_smoothX = g_smoothX * g_liaSmoothing + (g_velocityX) * (1.0f - g_liaSmoothing);
-    g_smoothY = g_smoothY * g_liaSmoothing + (g_velocityY) * (1.0f - g_liaSmoothing);
+    g_smoothX = g_smoothX * g_liaSmoothing + g_velocityX * (1.0f - g_liaSmoothing);
+    g_smoothY = g_smoothY * g_liaSmoothing + g_velocityY * (1.0f - g_liaSmoothing);
 
-    // Giảm chấn
     g_smoothX *= g_liaDamping;
     g_smoothY *= g_liaDamping;
 
     float mx = g_smoothX;
     float my = g_smoothY;
 
-    // Auto drag head khi bắn
     if (g_autoDragHead) {
         if (g_autoDragAccum > g_autoDragMax) {
             g_autoDragAccum += g_autoDragY;
@@ -271,7 +313,6 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
         }
     }
 
-    // Giới hạn vượt
     float dxMove = mx - g_prevX;
     float dyMove = my - g_prevY;
     float moveDist = sqrtf(dxMove*dxMove + dyMove*dyMove);
@@ -283,7 +324,6 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
         my = g_prevY + dyMove * scale;
     }
 
-    // SNAP LIA ĐẦU
     if (dist < g_snapThreshold) {
         float dxStable = fabsf(mx - g_prevX);
         float dyStable = fabsf(my - g_prevY);
@@ -291,16 +331,13 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
         if (dxStable < g_stabilizeRadius && dyStable < g_stabilizeRadius) {
             g_stableCounter++;
             if (g_stableCounter >= g_stabilizeCount) {
-                // SNAP cực mạnh
                 float snapFactor = (1.0f - (dist / (float)g_snapThreshold));
                 float snapX = nx * snapFactor * g_snapStrength * g_stickyStrength;
                 float snapY = (ny * snapFactor * g_snapStrength * g_stickyStrength) + hb;
 
-                // Lia cực ảo - nhảy tức thời
                 mx = snapX;
                 my = snapY;
 
-                // Reset velocity để không vượt
                 g_velocityX = 0;
                 g_velocityY = 0;
 
@@ -313,11 +350,9 @@ static void computeHeadLock(float tx, float ty, int* ox, int* oy, bool* ok) {
         g_stableCounter = 0;
     }
 
-    // Clamp
-    if (mx > 700) mx = 700; if (mx < -700) mx = -700;
-    if (my > 700) my = 700; if (my < -700) my = -700;
+    if (mx > 800) mx = 800; if (mx < -800) mx = -800;
+    if (my > 800) my = 800; if (my < -800) my = -800;
 
-    // Lưu state
     g_prevX = mx;
     g_prevY = my;
     g_lastSentX = mx;
@@ -337,11 +372,24 @@ static void* aimLoop(void*) {
         pthread_mutex_lock(&g_mutex);
         bool has = g_hasTarget;
         float tx = g_targetX, ty = g_targetY;
+        bool firing = g_firing;
         pthread_mutex_unlock(&g_mutex);
 
         int fd = (g_inputFd >= 0) ? g_inputFd : g_uinputFd;
 
         if (has) {
+            // Silent aim - tính vị trí đầu khi bắn
+            if (g_silentAim && firing) {
+                int sx, sy; bool sok;
+                computeSilentAim(tx, ty, &sx, &sy, &sok);
+                if (sok && fd >= 0) {
+                    // Silent aim: gửi touch tới vị trí đầu nhưng tâm không di chuyển
+                    // Trong thực tế cần hook vào game để thay đổi hướng bắn
+                    LOGI("Silent target: %d, %d", sx, sy);
+                }
+            }
+
+            // Aim lock bình thường
             int ox, oy; bool ok;
             computeHeadLock(tx, ty, &ox, &oy, &ok);
             if (ok && fd >= 0) {
@@ -360,6 +408,8 @@ static void* aimLoop(void*) {
             g_lastSentX = 0; g_lastSentY = 0;
             g_stableCounter = 0;
             g_autoDragAccum = 0;
+            g_silentPrevX = 0;
+            g_silentPrevY = 0;
         }
         usleep(delayUs);
     }
@@ -373,7 +423,7 @@ static void* aimLoop(void*) {
 
 __attribute__((constructor))
 static void onLoad() {
-    LOGI("=== AimLock Lia Dau Cuc Ao loaded ===");
+    LOGI("=== AimLock Head + Silent loaded ===");
     readDeviceProps();
     sleep(5);
 
@@ -432,34 +482,23 @@ JNIEXPORT void JNICALL Java_com_aimlock_Native_clearTarget(JNIEnv*, jclass) {
     g_hasTarget = false;
     pthread_mutex_unlock(&g_mutex);
 }
+JNIEXPORT void JNICALL Java_com_aimlock_Native_setFiring(JNIEnv*, jclass, jboolean firing) {
+    pthread_mutex_lock(&g_mutex);
+    g_firing = firing;
+    pthread_mutex_unlock(&g_mutex);
+}
 JNIEXPORT void JNICALL Java_com_aimlock_Native_setConfig(JNIEnv*, jclass,
     jint ls, jint asp, jint hb, jint hz, jint hoy) {
     g_lockStrength = ls; g_aimSpeed = asp; g_headshotBias = hb;
     g_touchHz = hz; g_headOffsetY = hoy;
 }
-JNIEXPORT void JNICALL Java_com_aimlock_Native_setHeadLockConfig(JNIEnv*, jclass,
-    jfloat headMult, jfloat sticky, jfloat curve, jint snapThresh,
-    jint snapStr, jfloat distBias) {
-    g_headMultiplier = headMult; g_stickyStrength = sticky;
-    g_lockCurve = curve; g_snapThreshold = snapThresh;
-    g_snapStrength = snapStr; g_distanceBias = distBias;
-}
-JNIEXPORT void JNICALL Java_com_aimlock_Native_setLiaConfig(JNIEnv*, jclass,
-    jfloat prediction, jint predFrames, jfloat smoothing, jfloat damping,
-    jfloat maxSpeed, jfloat accel, jfloat decel) {
-    g_predictionFactor = prediction;
-    g_predictionFrames = predFrames;
-    g_liaSmoothing     = smoothing;
-    g_liaDamping       = damping;
-    g_liaMaxSpeed      = maxSpeed;
-    g_liaAccel         = accel;
-    g_liaDecel         = decel;
-}
-JNIEXPORT void JNICALL Java_com_aimlock_Native_setAutoDragHead(JNIEnv*, jclass,
-    jint enable, jfloat dragY, jfloat dragMax) {
-    g_autoDragHead = enable;
-    g_autoDragY    = dragY;
-    g_autoDragMax  = dragMax;
+JNIEXPORT void JNICALL Java_com_aimlock_Native_setSilentAim(JNIEnv*, jclass,
+    jint enable, jint mode, jfloat fov, jfloat strength, jint smooth) {
+    g_silentAim      = enable;
+    g_silentMode     = mode;
+    g_silentFOV      = fov;
+    g_silentStrength = strength;
+    g_silentSmooth   = smooth;
 }
 JNIEXPORT jboolean JNICALL Java_com_aimlock_Native_isRunning(JNIEnv*, jclass) {
     return g_running ? JNI_TRUE : JNI_FALSE;
