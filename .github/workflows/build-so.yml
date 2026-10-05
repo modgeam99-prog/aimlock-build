@@ -10,13 +10,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
 
-      - name: List files
+      - name: List all files
         run: |
+          echo "=== PWD ==="
+          pwd
           echo "=== Root ==="
           ls -la
           echo "=== jni ==="
-          ls -la jni || echo "jni missing"
+          ls -la jni || echo "JNI FOLDER MISSING"
+          echo "=== git log ==="
+          git log --oneline -5
 
       - name: Build .so
         run: |
