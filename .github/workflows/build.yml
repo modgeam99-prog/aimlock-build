@@ -1,41 +1,21 @@
 name: Build SO
-
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup NDK
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r25c
-          add-to-path: true
-
-      - name: Build libaimlock.so
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          echo "NDK path: $ANDROID_NDK_HOME"
-          $ANDROID_NDK_HOME/ndk-build \
-            NDK_PROJECT_PATH=. \
-            APP_BUILD_SCRIPT=./jni/Android.mk \
-            NDK_APPLICATION_MK=./jni/Application.mk
-
-      - name: List output
-        run: find libs -name "*.so" -exec file {} \;
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: libaimlock
-          path: libs/
-          retention-days: 30
+    - uses: actions/checkout@v4
+    - uses: nttld/setup-ndk@v1
+      with:
+        ndk-version: r26b
+    - run: |
+        NDK=$ANDROID_NDK_HOME
+        $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++ \
+          -shared -fPIC -O2 \
+          -o aimlock.so aimlock.cpp \
+          -llog -ldl -pthread
+    - uses: actions/upload-artifact@v4
+      with:
+        name: aimlock-so
+        path: aimlock.so
