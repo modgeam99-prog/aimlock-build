@@ -13,20 +13,22 @@ jobs:
 
       - name: Setup NDK r25c
         uses: nttld/setup-ndk@v1
+        id: setup-ndk
         with:
           ndk-version: r25c
 
       - name: Debug info
         run: |
-          echo "NDK_HOME=$ANDROID_NDK_HOME"
-          ls -la $ANDROID_NDK_HOME | head
+          echo "NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}"
+          ls -la ${{ steps.setup-ndk.outputs.ndk-path }} | head
           echo "=== jni ==="
           ls -la jni
 
       - name: Build .so
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           set -x
-          chmod +x $ANDROID_NDK_HOME/ndk-build
           $ANDROID_NDK_HOME/ndk-build \
             NDK_PROJECT_PATH=. \
             APP_BUILD_SCRIPT=jni/Android.mk \
