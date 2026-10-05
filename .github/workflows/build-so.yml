@@ -1,0 +1,32 @@
+name: Build Aimlock SO
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup NDK r25c
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25c
+
+      - name: Build .so
+        run: |
+          $ANDROID_NDK_HOME/ndk-build \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=jni/Android.mk \
+            NDK_APPLICATION_MK=jni/Application.mk
+
+      - name: Show outputs
+        run: find libs -type f -name "*.so" -exec file {} \;
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aimlock-so
+          path: libs/**/*.so
