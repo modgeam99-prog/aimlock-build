@@ -11,11 +11,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: List files
+        run: |
+          echo "=== Root ==="
+          ls -la
+          echo "=== jni ==="
+          ls -la jni || echo "jni missing"
+
       - name: Build .so
         run: |
           NDK=$ANDROID_NDK_LATEST_HOME
-          echo "Using NDK: $NDK"
-          ls -la $NDK/ndk-build
           $NDK/ndk-build \
             NDK_PROJECT_PATH=. \
             APP_BUILD_SCRIPT=jni/Android.mk \
