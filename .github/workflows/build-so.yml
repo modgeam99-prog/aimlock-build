@@ -11,25 +11,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup NDK r25c
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r25c
-
-      - name: Debug info
-        run: |
-          echo "NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}"
-          ls -la ${{ steps.setup-ndk.outputs.ndk-path }} | head
-          echo "=== jni ==="
-          ls -la jni
-
       - name: Build .so
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          set -x
-          $ANDROID_NDK_HOME/ndk-build \
+          NDK=$ANDROID_NDK_LATEST_HOME
+          echo "Using NDK: $NDK"
+          ls -la $NDK/ndk-build
+          $NDK/ndk-build \
             NDK_PROJECT_PATH=. \
             APP_BUILD_SCRIPT=jni/Android.mk \
             NDK_APPLICATION_MK=jni/Application.mk
