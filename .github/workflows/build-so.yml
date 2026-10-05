@@ -16,8 +16,17 @@ jobs:
         with:
           ndk-version: r25c
 
+      - name: Debug info
+        run: |
+          echo "NDK_HOME=$ANDROID_NDK_HOME"
+          ls -la $ANDROID_NDK_HOME | head
+          echo "=== jni ==="
+          ls -la jni
+
       - name: Build .so
         run: |
+          set -x
+          chmod +x $ANDROID_NDK_HOME/ndk-build
           $ANDROID_NDK_HOME/ndk-build \
             NDK_PROJECT_PATH=. \
             APP_BUILD_SCRIPT=jni/Android.mk \
